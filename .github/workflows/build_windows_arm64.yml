@@ -100,8 +100,11 @@ jobs:
           cd deps
           mkdir build-arm64
           cd build-arm64
+          rem Use forward slashes in DESTDIR so CMake doesn't treat C:\a\... as
+          rem invalid character escapes (e.g. \a) when the path is re-parsed.
+          set "DESTDIR=%CD:\=/%/OrcaSlicer_dep"
           cmake ../ -G "Visual Studio 17 2022" -A ARM64 ^
-            -DDESTDIR="%CD%/OrcaSlicer_dep" ^
+            -DDESTDIR="%DESTDIR%" ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DDEP_DEBUG=OFF ^
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -110,7 +113,7 @@ jobs:
       - name: Build OrcaSlicer (ARM64)
         shell: cmd
         run: |
-          set DEPS=%CD%\deps\build-arm64\OrcaSlicer_dep
+          set "DEPS=%CD:\=/%/deps/build-arm64/OrcaSlicer_dep"
           mkdir build-arm64
           cd build-arm64
           cmake .. -G "Visual Studio 17 2022" -A ARM64 ^
