@@ -3,10 +3,16 @@
 set WP=%CD%
 set _START_TIME=%TIME%
 
-@REM Detect target architecture (default x64; pass "arm64" to build for ARM64)
+@REM Default target architecture to the host CPU arch; override by passing
+@REM "x64" or "arm64" as an argument. PROCESSOR_ARCHITEW6432 covers a 32-bit
+@REM shell running on a 64-bit OS, where PROCESSOR_ARCHITECTURE reads "x86".
 set arch=x64
+if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" set arch=ARM64
+if /I "%PROCESSOR_ARCHITEW6432%"=="ARM64" set arch=ARM64
 if /I "%1"=="arm64" set arch=ARM64
 if /I "%2"=="arm64" set arch=ARM64
+if /I "%1"=="x64" set arch=x64
+if /I "%2"=="x64" set arch=x64
 
 @REM Check for Ninja Multi-Config option (-x)
 set USE_NINJA=0

@@ -15,13 +15,18 @@ if "%1"=="pack" (
 
 set debug=OFF
 set debuginfo=OFF
+@REM Default target architecture to the host CPU arch; override with x64/arm64 arg.
 set arch=x64
+if /I "%PROCESSOR_ARCHITECTURE%"=="ARM64" set arch=ARM64
+if /I "%PROCESSOR_ARCHITEW6432%"=="ARM64" set arch=ARM64
 if "%1"=="debug" set debug=ON
 if "%2"=="debug" set debug=ON
 if "%1"=="debuginfo" set debuginfo=ON
 if "%2"=="debuginfo" set debuginfo=ON
-if "%1"=="arm64" set arch=ARM64
-if "%2"=="arm64" set arch=ARM64
+if /I "%1"=="arm64" set arch=ARM64
+if /I "%2"=="arm64" set arch=ARM64
+if /I "%1"=="x64" set arch=x64
+if /I "%2"=="x64" set arch=x64
 if "%debug%"=="ON" (
     set build_type=Debug
     set build_dir=build-dbg
