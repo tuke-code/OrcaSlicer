@@ -3506,8 +3506,20 @@ void GLCanvas3D::on_char(wxKeyEvent& evt)
                     post_event(SimpleEvent(EVT_GLCANVAS_ARRANGE));
                 break;
             }
-        //case 'B':
-        //case 'b': { zoom_to_bed(); break; }
+        case 'B':
+        case 'b': {
+            // Toggle belt printer "show designed" view when in G-code preview with belt mode active.
+            if (dynamic_cast<Preview*>(m_canvas->GetParent()) != nullptr &&
+                m_gcode_viewer.is_belt_view()) {
+                m_gcode_viewer.toggle_belt_show_designed();
+                // The designed-view back-transform is baked into the toolpath geometry at load
+                // time, so the toggle only takes visual effect once the preview is re-converted.
+                if (Plater* plater = wxGetApp().plater())
+                    plater->refresh_belt_view();
+                m_dirty = true;
+            }
+            break;
+        }
         case 'C':
         case 'c': { wxGetApp().toggle_show_gcode_window(); m_dirty = true; request_extra_frame(); break; }
         //case 'G':
@@ -9181,6 +9193,21 @@ void GLCanvas3D::_render_canvas_toolbar()
             ImGui::SameLine(12.f * sc);
             ImGui::TextColored(enable ? ImVec4(1,1,1,1) : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled), "%s", into_u8(condition ? ImGui::VisibleIcon : ImGui::HiddenIcon).c_str());
         };
+
+        // Belt printers, G-code preview only: toggle the designed (upright) view vs the raw
+        // machine-frame G-code. Same state as hotkey B and the legend checkbox; the reload is
+        // deferred (CallAfter) so the preview is not rebuilt mid-render.
+        if (m_canvas_type == ECanvasType::CanvasPreview && m_gcode_viewer.is_belt_view()) {
+            create_menu_item( _utf8(L("Show raw G-code (belt only)")),
+                true,
+                !m_gcode_viewer.is_belt_show_designed(), // eye lit = raw machine-frame G-code (designed view off)
+                [this, p]{
+                    m_gcode_viewer.toggle_belt_show_designed();
+                    p->CallAfter([p]{ p->refresh_belt_view(); });
+                }
+            );
+            ImGui::Separator();
+        }
 
         create_menu_item( _utf8(L("3D Navigator")),
             m_canvas_type != ECanvasType::CanvasAssembleView, // not work on assembly

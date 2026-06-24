@@ -3072,6 +3072,44 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         return;
     }
 
+    // Belt printer: derive the physical tilt magnitude from the slicing-rotation
+    // angle header comment (used to enable the preview's belt view).
+    if (boost::starts_with(comment, " belt_slice_rotation_angle = ")) {
+        try {
+            m_result.belt_tilt_angle = std::abs(std::stof(std::string(comment.substr(29))));
+        } catch (...) {}
+        return;
+    }
+    // Belt printer: parse pre-slice axis remap from header comments.
+    {
+        auto trim = [](const std::string &s) -> std::string {
+            size_t start = s.find_first_not_of(" \t\r\n");
+            size_t end   = s.find_last_not_of(" \t\r\n");
+            return (start == std::string::npos) ? "" : s.substr(start, end - start + 1);
+        };
+        // Pre-slice axis remap
+        auto parse_remap_axis = [](const std::string &s) -> RemapAxis {
+            if (s == "pos_x") return RemapAxis::PosX;
+            if (s == "pos_y") return RemapAxis::PosY;
+            if (s == "pos_z") return RemapAxis::PosZ;
+            if (s == "neg_x") return RemapAxis::NegX;
+            if (s == "neg_y") return RemapAxis::NegY;
+            if (s == "neg_z") return RemapAxis::NegZ;
+            if (s == "rev_x") return RemapAxis::RevX;
+            if (s == "rev_y") return RemapAxis::RevY;
+            if (s == "rev_z") return RemapAxis::RevZ;
+            return RemapAxis::PosX;
+        };
+        if (boost::starts_with(comment, " preslice_remap_x = ")) {
+            m_result.preslice_remap_x = parse_remap_axis(trim(std::string(comment.substr(25)))); return;
+        }
+        if (boost::starts_with(comment, " preslice_remap_y = ")) {
+            m_result.preslice_remap_y = parse_remap_axis(trim(std::string(comment.substr(25)))); return;
+        }
+        if (boost::starts_with(comment, " preslice_remap_z = ")) {
+            m_result.preslice_remap_z = parse_remap_axis(trim(std::string(comment.substr(25)))); return;
+        }
+    }
     // wipe start tag
     if (boost::starts_with(comment, reserved_tag(ETags::Wipe_Start))) {
         m_wiping = true;
@@ -4895,6 +4933,13 @@ void GCodeProcessor::process_G92(const GCodeReader::GCodeLine& line)
     if (line.has_z()) {
         m_origin[Z] = m_end_position[Z] - line.z() * lengths_scale_factor;
         any_found = true;
+        // Belt only: the start G-code's purge-blob advance + G92 Z0 resets leave a constant
+        // machine-Z origin offset here; the designed-view back-transform subtracts it so
+        // toolpaths map to the model's belt coordinate (gcode Z). Gated on belt_tilt_angle
+        // (set from the belt header, parsed before the body) so non-belt G-code processing
+        // is byte-identical — no unconditional work on the shared path.
+        if (m_result.belt_tilt_angle != 0.f)
+            m_result.belt_z_origin = m_origin[Z];
     }
 
     if (line.has_e()) {

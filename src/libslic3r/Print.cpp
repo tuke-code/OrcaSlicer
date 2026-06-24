@@ -12,6 +12,7 @@
 #include "Thread.hpp"
 #include "Time.hpp"
 #include "GCode.hpp"
+#include "BeltGCode.hpp"
 #include "GCode/WipeTower.hpp"
 #include "GCode/WipeTower2.hpp"
 #include "Utils.hpp"
@@ -101,6 +102,12 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
     // Cache the plenty of parameters, which influence the G-code generator only,
     // or they are only notes not influencing the generated G-code.
     static std::unordered_set<std::string> steps_gcode = {
+        // Belt printer G-code axis remap (only affects G-code output, not slicing).
+        "gcode_remap_x",
+        "gcode_remap_y",
+        "gcode_remap_z",
+        // Machine-frame transform (derived from belt tilt; only affects G-code output).
+        "belt_frame_tilt_decouple", "belt_frame_tilt_angle",
         //BBS
         "additional_cooling_fan_speed",
         "reduce_crossing_wall",
@@ -281,8 +288,26 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // Spiral Vase forces different kind of slicing than the normal model:
             // In Spiral Vase mode, holes are closed and only the largest area contour is kept at each layer.
             // Therefore toggling the Spiral Vase on / off requires complete reslicing.
-            || opt_key == "spiral_mode") {
+            || opt_key == "spiral_mode"
+            // Build plate tilt changes slicing plane orientation.
+            || opt_key == "build_plate_tilt_x"
+            || opt_key == "build_plate_tilt_y"
+            // Belt printer transform options change the mesh geometry before slicing.
+            || opt_key == "belt_printer"
+            || opt_key == "belt_slice_rotation"
+            || opt_key == "belt_slice_rotation_angle"
+            || opt_key == "belt_slice_rotation_global"
+            || opt_key == "belt_preslice_global"
+            || opt_key == "preslice_remap_global"
+            || opt_key == "preslice_remap_x"
+            || opt_key == "preslice_remap_y"
+            || opt_key == "preslice_remap_z") {
             osteps.emplace_back(posSlice);
+        } else if (
+               opt_key == "belt_support_floor_offset"
+            || opt_key == "belt_support_floor_mode"
+            || opt_key == "belt_support_z_offset_mode") {
+            osteps.emplace_back(posSupportMaterial);
         } else if (
                opt_key == "print_sequence"
             || opt_key == "filament_type"
@@ -574,6 +599,9 @@ std::vector<ObjectID> Print::print_object_ids() const
 
 bool Print::has_infinite_skirt() const
 {
+    // Belt printer: no skirt support.
+    if (m_config.belt_printer.value)
+        return false;
     // Orca: unclear why (m_config.ooze_prevention && this->extruders().size() > 1) logic is here, removed.
     // return (m_config.draft_shield == dsEnabled && m_config.skirt_loops > 0) || (m_config.ooze_prevention && this->extruders().size() > 1);
 
@@ -582,6 +610,9 @@ bool Print::has_infinite_skirt() const
 
 bool Print::has_skirt() const
 {
+    // Belt printer: no skirt support.
+    if (m_config.belt_printer.value)
+        return false;
     return (m_config.skirt_height > 0);
 }
 
@@ -1283,6 +1314,16 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
 
+    // Belt printer validation: incompatible features.
+    if (m_config.belt_printer.value) {
+        for (const PrintObject *object : m_objects) {
+            if (object->config().raft_layers > 0)
+                return { L("Raft is not compatible with belt printer mode.") };
+        }
+        if (m_config.draft_shield != dsDisabled)
+            return { L("Draft shield is not compatible with belt printer mode.") };
+    }
+
     if (nozzles < 2 && extruders.size() > 1) {
         auto ret = check_multi_filament_valid(*this);
         if (!ret.string.empty())
@@ -1374,6 +1415,28 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
     // Checks that the print does not exceed the max print height
     for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++ print_object_idx) {
         const PrintObject &print_object = *m_objects[print_object_idx];
+        // Belt printer: the sliced (virtual) Z is belt travel along the conveyor, not
+        // build height, so the loop below (which measures the sliced layer stack) is
+        // meaningless here. The real ceiling is the usable vertical clearance above the
+        // belt, which printable_height holds directly: the gantry travels up the tilted
+        // plane, so a part of height z needs gantry reach z / cos(tilt), and the machine's
+        // gantry-axis range is sized to accommodate that (e.g. IdeaFormer IR3 V2: ~354 mm
+        // of gantry travel = 250 mm vertical at 45°, and printable_height = 250). So compare
+        // the upright object height against printable_height directly.
+        if (m_config.belt_printer.value) {
+            const double max_h = m_config.printable_height.value;
+            double obj_top = 0.0;
+            const ModelObject *mo = print_object.model_object();
+            for (const ModelInstance *mi : mo->instances)
+                obj_top = std::max(obj_top, mo->instance_bounding_box(*mi).max.z());
+            if (obj_top > max_h + EPSILON)
+                return StringObjectException{
+                    Slic3r::format(_u8L("The object %1% exceeds the maximum printable height "
+                        "above the belt (%2% mm)."),
+                        print_object.model_object()->name, max_h),
+                    print_object.model_object(), "" };
+            continue;
+        }
         //FIXME It is quite expensive to generate object layers just to get the print height!
         if (auto layers = generate_object_layers(print_object.slicing_parameters(), layer_height_profile(print_object_idx), print_object.config().precise_z_height.value);
             !layers.empty()) {
@@ -2247,15 +2310,24 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
     int object_count = m_objects.size();
     std::set<PrintObject*> need_slicing_objects;
     std::set<PrintObject*> re_slicing_objects;
+    // Belt global modes couple each object's bed position into its layer Z values,
+    // so sharing layers between "identical" objects is wrong.
+    bool belt_no_share = m_config.belt_printer.value &&
+        ((m_config.belt_slice_rotation_global.value
+              && m_config.belt_slice_rotation.value != BeltRotationAxis::None)
+         || m_config.preslice_remap_global.value
+         || m_config.belt_preslice_global.value);
     if (!use_cache) {
         for (int index = 0; index < object_count; index++)
         {
             PrintObject *obj =  m_objects[index];
-            for (PrintObject *slicing_obj : need_slicing_objects)
-            {
-                if (is_print_object_the_same(obj, slicing_obj)) {
-                    obj->set_shared_object(slicing_obj);
-                    break;
+            if (!belt_no_share) {
+                for (PrintObject *slicing_obj : need_slicing_objects)
+                {
+                    if (is_print_object_the_same(obj, slicing_obj)) {
+                        obj->set_shared_object(slicing_obj);
+                        break;
+                    }
                 }
             }
             if (!obj->get_shared_object())
@@ -2274,12 +2346,14 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
             PrintObject *obj =  m_objects[index];
             bool found_shared = false;
             if (need_slicing_objects.find(obj) == need_slicing_objects.end()) {
-                for (PrintObject *slicing_obj : need_slicing_objects)
-                {
-                    if (is_print_object_the_same(obj, slicing_obj)) {
-                        obj->set_shared_object(slicing_obj);
-                        found_shared = true;
-                        break;
+                if (!belt_no_share) {
+                    for (PrintObject *slicing_obj : need_slicing_objects)
+                    {
+                        if (is_print_object_the_same(obj, slicing_obj)) {
+                            obj->set_shared_object(slicing_obj);
+                            found_shared = true;
+                            break;
+                        }
                     }
                 }
                 if (!found_shared) {
@@ -2641,12 +2715,17 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     this->set_status(80, message);
 
     // The following line may die for multiple reasons.
-    GCode gcode;
+    // Factory: use BeltGCode for belt printers, plain GCode otherwise.
+    std::unique_ptr<GCode> gcode;
+    if (m_config.belt_printer.value)
+        gcode = std::make_unique<BeltGCode>();
+    else
+        gcode = std::make_unique<GCode>();
     //BBS: compute plate offset for gcode-generator
     const Vec3d origin = this->get_plate_origin();
-    gcode.set_gcode_offset(origin(0), origin(1));
-    gcode.do_export(this, path.c_str(), result, thumbnail_cb);
-    gcode.export_layer_filaments(result);
+    gcode->set_gcode_offset(origin(0), origin(1));
+    gcode->do_export(this, path.c_str(), result, thumbnail_cb);
+    gcode->export_layer_filaments(result);
     //BBS
     if (result != nullptr)
         result->conflict_result = m_conflict_result;
@@ -2655,6 +2734,10 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
 
 void Print::_make_skirt()
 {
+    // Belt printer: skirt is not compatible.
+    if (m_config.belt_printer.value)
+        return;
+  
     const bool generate_skirt = this->has_skirt() || this->has_infinite_skirt();
 
     // First off we need to decide how tall the skirt must be.

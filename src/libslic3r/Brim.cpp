@@ -895,6 +895,10 @@ void make_brim(const Print& print, PrintTryCancel try_cancel, Polygons& islands_
     std::map<ObjectID, ExPolygons>* objectBrimAreasOut,
     std::map<ObjectID, ExPolygons>* supportBrimAreasOut)
 {
+    // Belt printer: brim is not compatible with belt printing.
+    if (print.config().belt_printer.value)
+        return;
+
     std::map<ObjectID, double> brim_width_map;
     std::map<ObjectID, ExPolygons> brimAreaMap;
     std::map<ObjectID, ExPolygons> supportBrimAreaMap;
